@@ -91,39 +91,48 @@ class ImapConnection {
 
 	/**
 	 * Sends every FETCH before reading any reply, so a group costs one round trip
-	 * instead of one per message. Replies come back in command order.
+	 * instead of one per message.
 	 */
 	async fetchMessages(uids: string[]): Promise<{ uid: string; raw: ArrayBuffer; flags: string[] }[]> {
 		const tags = uids.map(() => this.nextTag());
 		// BODY.PEEK[] leaves the source's \Seen flag untouched, unlike RFC822.
 		await this.write(uids.map((uid, index) => `${tags[index]} UID FETCH ${uid} (FLAGS BODY.PEEK[])\r\n`).join(""));
-		const fetched: { uid: string; raw: ArrayBuffer; flags: string[] }[] = [];
-		for (const [index, uid] of uids.entries()) {
-			fetched.push({ uid, ...(await this.readFetchReply(tags[index])) });
-		}
-		return fetched;
+		const replies = await this.readFetchReplies(tags);
+		return uids.map((uid) => {
+			const reply = replies.get(uid);
+			if (!reply) throw new Error("IMAP fetch returned no message");
+			return { uid, ...reply };
+		});
 	}
 
-	private async readFetchReply(tag: string): Promise<{ raw: ArrayBuffer; flags: string[] }> {
-		let raw: ArrayBuffer | null = null;
-		let flags: string[] = [];
+	/**
+	 * Reads until every pipelined FETCH has completed. Messages are matched by the UID in
+	 * their own response, not by position: Dovecot sends the data of several commands
+	 * before any of their tagged completions.
+	 */
+	private async readFetchReplies(tags: string[]): Promise<Map<string, { raw: ArrayBuffer; flags: string[] }>> {
+		const replies = new Map<string, { raw: ArrayBuffer; flags: string[] }>();
+		const pending = new Set(tags);
 
-		while (true) {
+		while (pending.size) {
 			const line = await this.readLine();
-			flags = parseFetchFlags(line) ?? flags;
 			const literalLength = getLiteralLength(line);
 			if (literalLength !== null) {
-				raw = await this.readBytes(literalLength);
+				// One message: the response up to the literal, the body, then the rest of the response.
+				const raw = await this.readBytes(literalLength);
+				const rest = await this.readLine();
+				const uid = (line.match(/\bUID (\d+)/i) ?? rest.match(/\bUID (\d+)/i))?.[1];
+				if (uid) replies.set(uid, { raw, flags: parseFetchFlags(line) ?? parseFetchFlags(rest) ?? [] });
 				continue;
 			}
-			if (isTaggedCompletion(line, tag)) {
-				if (!line.toUpperCase().includes(" OK")) {
-					throw new Error(`IMAP fetch failed: ${line}`);
-				}
-				if (!raw) throw new Error("IMAP fetch returned no message");
-				return { raw, flags };
+			const tag = tags.find((candidate) => isTaggedCompletion(line, candidate));
+			if (!tag) continue;
+			if (!line.toUpperCase().includes(" OK")) {
+				throw new Error(`IMAP fetch failed: ${line}`);
 			}
+			pending.delete(tag);
 		}
+		return replies;
 	}
 
 	private nextTag(): string {

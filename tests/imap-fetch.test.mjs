@@ -52,7 +52,7 @@ const { fetchImapMessages, parseFetchFlags, connectSocket } = await import(pathT
 
 const CHUNK = 16 * 1024;
 
-function startServer(messages) {
+function startServer(messages, { deferCompletions = false } = {}) {
 	const commands = [];
 	globalThis.__imapConnect = () => {
 		let controller;
@@ -71,6 +71,8 @@ function startServer(messages) {
 		const writable = new WritableStream({
 			write(chunk) {
 				// Pipelined commands arrive in one write, so answer each line in order.
+				// Dovecot holds the tagged completions of pipelined FETCHes back until their data is out.
+				const deferred = [];
 				for (const line of Buffer.from(chunk).toString().split("\r\n").filter(Boolean)) {
 					commands.push(line);
 					const [tag, ...rest] = line.split(" ");
@@ -90,8 +92,10 @@ function startServer(messages) {
 								: Buffer.concat([Buffer.from(`${head}FLAGS (${flags}) BODY[] {${body.length}}\r\n`), body, Buffer.from(")\r\n")]),
 						);
 					}
-					send(`${tag} OK done\r\n`);
+					if (deferCompletions && fetch) deferred.push(`${tag} OK done\r\n`);
+					else send(`${tag} OK done\r\n`);
 				}
+				for (const completion of deferred) send(completion);
 			},
 		});
 		return { readable, writable };
@@ -153,6 +157,27 @@ test("large messages arrive intact and a batch stops at the byte budget", async 
 	const second = await fetchImapMessages({ ...baseInput, offset: first.nextOffset });
 	assert.deepEqual(second.messages.map((item) => item.filename), ["INBOX-1.eml"]);
 	assert.equal(second.nextOffset, null);
+});
+
+test("pipelined fetches are matched by UID when the server completes them together", async () => {
+	const bodies = { 1: message(300, 65), 2: message(200, 66), 3: message(250, 67) };
+	startServer(
+		{ 1: { body: bodies[1], flags: "\\Seen" }, 2: { body: bodies[2], flags: "\\Flagged", flagsAfterBody: true }, 3: { body: bodies[3], flags: "" } },
+		{ deferCompletions: true },
+	);
+	const result = await fetchImapMessages(baseInput);
+	assert.deepEqual(
+		result.messages.map((item) => [item.filename, item.read, item.starred]),
+		[
+			["INBOX-1.eml", true, false],
+			["INBOX-2.eml", false, true],
+			["INBOX-3.eml", false, false],
+		],
+	);
+	for (const item of result.messages) {
+		const uid = item.filename.match(/-(\d+)\.eml$/)[1];
+		assert.ok(Buffer.from(item.raw).equals(bodies[uid]), `message ${uid} got another message's body`);
+	}
 });
 
 test("the self-hosted runtime imports through its own connector instead of cloudflare:sockets", async () => {
