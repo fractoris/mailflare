@@ -7,6 +7,7 @@ import { openMailer, type Mailer, type MailerConfig } from "./mailer";
 import { openAssets, openRateLimiter } from "./misc";
 import { openQueue, type InProcessQueue } from "./queue";
 import { RealtimeHubRegistry } from "./realtime";
+import { connectSocket } from "./sockets";
 import { openSqliteDatabase, type SqliteDatabase } from "./sqlite-database";
 import type { NodeRuntime } from "./types";
 
@@ -77,6 +78,7 @@ export function createNodeRuntime(): NodeRuntime {
 		GITHUB_UPDATE_REPO: optional("GITHUB_UPDATE_REPO"),
 		// Marks the runtime for the few places that must behave differently.
 		MAILFLARE_RUNTIME: "node",
+		SOCKETS: { connect: connectSocket },
 		APP_URL: optional("APP_URL")?.replace(/\/$/, ""),
 		INBOUND_WEBHOOK_SECRET: optional("INBOUND_WEBHOOK_SECRET"),
 		VAPID_PUBLIC_KEY: optional("VAPID_PUBLIC_KEY"),

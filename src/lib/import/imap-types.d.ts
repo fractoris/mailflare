@@ -9,3 +9,11 @@ export type ImapImportInput = {
 	/** Number of newest messages already imported by earlier batches. */
 	offset: number;
 };
+
+/** The part of a Cloudflare `Socket` the IMAP client uses; the self-hosted runtime supplies the same shape. */
+export type ImapSocket = Pick<Socket, "readable" | "writable">;
+
+export type ImapSocketConnect = (
+	address: { hostname: string; port: number },
+	options: { secureTransport: "on" | "off"; allowHalfOpen: boolean },
+) => ImapSocket;

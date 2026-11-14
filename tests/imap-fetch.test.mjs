@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test, { after } from "node:test";
@@ -18,7 +19,8 @@ writeFileSync(mockSockets, "export const connect = (...args) => globalThis.__ima
 await build({
 	stdin: {
 		contents: `export { fetchImapMessages } from "./src/lib/import/imap.ts";
-export { parseFetchFlags } from "./src/lib/import/imap-utils.ts";`,
+export { parseFetchFlags } from "./src/lib/import/imap-utils.ts";
+export { connectSocket } from "./server/runtime/sockets.ts";`,
 		resolveDir: root,
 		sourcefile: "imap-fetch-test-entry.js",
 	},
@@ -46,7 +48,7 @@ export { parseFetchFlags } from "./src/lib/import/imap-utils.ts";`,
 	],
 });
 
-const { fetchImapMessages, parseFetchFlags } = await import(pathToFileURL(join(outDir, "entry.mjs")).href);
+const { fetchImapMessages, parseFetchFlags, connectSocket } = await import(pathToFileURL(join(outDir, "entry.mjs")).href);
 
 const CHUNK = 16 * 1024;
 
@@ -151,4 +153,44 @@ test("large messages arrive intact and a batch stops at the byte budget", async 
 	const second = await fetchImapMessages({ ...baseInput, offset: first.nextOffset });
 	assert.deepEqual(second.messages.map((item) => item.filename), ["INBOX-1.eml"]);
 	assert.equal(second.nextOffset, null);
+});
+
+test("the self-hosted runtime imports through its own connector instead of cloudflare:sockets", async () => {
+	startServer({ 1: { body: message(200, 65), flags: "" } });
+	const nodeConnect = globalThis.__imapConnect;
+	globalThis.__imapConnect = () => {
+		throw new Error("cloudflare:sockets must not be used off Workers");
+	};
+	globalThis.__mailflareNodeEnv = { MAILFLARE_RUNTIME: "node", SOCKETS: { connect: nodeConnect } };
+	try {
+		const result = await fetchImapMessages(baseInput);
+		assert.deepEqual(result.messages.map((item) => item.filename), ["INBOX-1.eml"]);
+	} finally {
+		delete globalThis.__mailflareNodeEnv;
+	}
+});
+
+test("the Node connector carries bytes both ways and reports a refused connection", async () => {
+	const server = createServer((socket) => {
+		socket.write("* OK ready\r\n");
+		socket.on("data", (chunk) => socket.end(`echo ${chunk}`));
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const { port } = server.address();
+	try {
+		const socket = connectSocket({ hostname: "127.0.0.1", port }, { secureTransport: "off", allowHalfOpen: false });
+		const reader = socket.readable.getReader();
+		const writer = socket.writable.getWriter();
+		assert.equal(Buffer.from((await reader.read()).value).toString(), "* OK ready\r\n");
+		await writer.write(new TextEncoder().encode("a1 NOOP\r\n"));
+		let reply = "";
+		for (let chunk = await reader.read(); !chunk.done; chunk = await reader.read()) reply += Buffer.from(chunk.value).toString();
+		assert.equal(reply, "echo a1 NOOP\r\n");
+		await writer.close().catch(() => undefined);
+	} finally {
+		await new Promise((resolve) => server.close(resolve));
+	}
+
+	const refused = connectSocket({ hostname: "127.0.0.1", port }, { secureTransport: "off", allowHalfOpen: false });
+	await assert.rejects(refused.readable.getReader().read(), /ECONNREFUSED/);
 });

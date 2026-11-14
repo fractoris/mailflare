@@ -72,6 +72,8 @@ interface CloudflareEnv {
 	GITHUB_UPDATE_REPO?: string;
 	/** "node" when served by the self-hosted runtime in server/; unset on Workers. */
 	MAILFLARE_RUNTIME?: "node";
+	/** Outbound TCP for IMAP import on the self-hosted runtime (server/runtime/sockets.ts); Workers use cloudflare:sockets. */
+	SOCKETS?: { connect: import("./src/lib/import/imap-types").ImapSocketConnect };
 	/** Shared secret the Cloudflare email relay signs inbound webhooks with (self-hosted only). */
 	INBOUND_WEBHOOK_SECRET?: string;
 	/** "1" refuses relays that do not sign the header map with a timestamp (relay Worker v2). */

@@ -1,5 +1,6 @@
 import type { ImportMessageInput } from "./types";
-import type { ImapImportInput } from "./imap-types";
+import type { ImapImportInput, ImapSocket, ImapSocketConnect } from "./imap-types";
+import { getNodeEnv } from "@/lib/runtime";
 import {
 	assertSafeImapHost,
 	getLiteralLength,
@@ -12,19 +13,17 @@ import {
 	selectImapUidBatch,
 } from "./imap-utils";
 
-type CloudflareSocketConnect = (
-	address: { hostname: string; port: number },
-	options: { secureTransport: "on" | "off"; allowHalfOpen: boolean },
-) => Socket;
-
-async function getCloudflareSocketConnect(): Promise<CloudflareSocketConnect> {
+async function getSocketConnect(): Promise<ImapSocketConnect> {
+	// The self-hosted server has no cloudflare:sockets and publishes a net/tls connect on its env instead.
+	const nodeConnect = getNodeEnv()?.SOCKETS?.connect;
+	if (nodeConnect) return nodeConnect;
 	try {
 		const moduleName = "cloudflare:sockets";
 		const sockets = await import(
 			/* webpackIgnore: true */
 			/* @vite-ignore */
 			moduleName
-		) as { connect: CloudflareSocketConnect };
+		) as { connect: ImapSocketConnect };
 		return sockets.connect;
 	} catch {
 		throw new Error("IMAP import requires the Cloudflare Workers socket runtime");
@@ -44,7 +43,7 @@ class ImapConnection {
 	private scanned = 0;
 	private tagCounter = 0;
 
-	constructor(socket: Socket) {
+	constructor(socket: ImapSocket) {
 		this.reader = socket.readable.getReader();
 		this.writer = socket.writable.getWriter();
 	}
@@ -203,7 +202,7 @@ export type ImapFetchResult = {
 
 export async function fetchImapMessages(input: ImapImportInput): Promise<ImapFetchResult> {
 	assertSafeImapHost(input.host);
-	const connect = await getCloudflareSocketConnect();
+	const connect = await getSocketConnect();
 	const socket = connect(
 		{ hostname: input.host, port: input.port },
 		{ secureTransport: input.secure ? "on" : "off", allowHalfOpen: false },
@@ -242,7 +241,7 @@ export async function fetchImapMessages(input: ImapImportInput): Promise<ImapFet
 
 export async function listImapFolders(input: Omit<ImapImportInput, "folder" | "limit" | "offset">): Promise<string[]> {
 	assertSafeImapHost(input.host);
-	const connect = await getCloudflareSocketConnect();
+	const connect = await getSocketConnect();
 	const socket = connect(
 		{ hostname: input.host, port: input.port },
 		{ secureTransport: input.secure ? "on" : "off", allowHalfOpen: false },
